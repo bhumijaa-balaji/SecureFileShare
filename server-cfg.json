@@ -1,0 +1,10 @@
+{
+    "host": "localhost",
+    "port": 8000,
+    "server_secret": "3994d68594e0dc2c9759322f3bf93c25489c8b77d674c73ac3104cd7f7dd6da6",
+    "max_file_size": 5242880,
+    "max_expiration": 1,
+    "file_db_path": "files.db",
+    "users_db_path": "users.db",
+    "default_expiration": 2
+}
