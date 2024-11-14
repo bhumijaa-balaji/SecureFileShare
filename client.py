@@ -9,6 +9,7 @@ from cryptography.hazmat.primitives.hmac import HMAC
 import base64
 import argparse
 import getpass
+import re
 
 class SecureFileClient:
     def __init__(self, config_file, username, password):
@@ -107,12 +108,24 @@ class SecureFileClient:
                     print(f"File uploaded successfully. Identifier: {file_identifier}")
                 else:
                     full_command = f"{command} {' '.join(map(str, args))}".encode()
+                    print(full_command)
                     s.sendall(full_command)
                     response = s.recv(1024).decode()
                     print(f"Server response: {response}")
 
+                    if command == "list-uploaded" or command == "list-available" or command == "send-to":
+                        # For these commands, we expect a JSON response
+                        response = response+' '
+                        while True:
+                            chunk = s.recv(1024).decode()
+                            if not chunk:
+                                break
+                            response += chunk
+
                 if command == "download":
                     file_id = args[0]
+                    s.sendall("download".encode())
+                    s.sendall(file_id.encode())
                     encrypted_data = s.recv(4096)
                     decrypted_data = self.decrypt_file(encrypted_data)
                     with open(f"downloaded_{file_id}", 'wb') as f:
@@ -125,13 +138,22 @@ class SecureFileClient:
         except Exception as e:
             print(f"An error occurred: {e}")
 
-    def list_uploaded(self):
+    def list_uploaded(self):        
         response = self.send_command("list-uploaded")
+        print('Response inside list-uploaded',response)
         if response:
-            self.uploaded_files = json.loads(response)
-            print("Uploaded Files:")
-            for file in self.uploaded_files:
-                print(f"FID: {file['fid']}, Filename: {file['filename']}, Expiration: {file['expiration']}, Downloads left: {file['downloads_left']}")
+            try:
+                _, json_data = response.split('[', 1)
+                json_data = '[' + json_data
+                self.uploaded_files = json.loads(json_data)
+                if self.uploaded_files:
+                    print("Uploaded Files:")
+                    for file in self.uploaded_files:
+                        print(f"FID: {file['fid']}, Filename: {file['filename']}, Expiration: {file['expiration']}, Downloads left: {file['downloads_left']}")
+            except json.JSONDecodeError:
+                print("No files uploaded or unable to parse the server response.")
+        else:
+            print("No response received from the server.")
 
     def list_available(self):
         response = self.send_command("list-available")
@@ -142,8 +164,7 @@ class SecureFileClient:
                 print(f"FID: {file['fid']}, Filename: {file['filename']}, Sender: {file['sender']}")
 
     def download_by_fid(self, fid):
-        file_info = next((file for file in self.uploaded_files + self.available_files if file['fid'] == fid), None)
-        if file_info:
+        if fid:
             self.send_command("download", fid)
         else:
             print(f"No file found with FID: {fid}")
@@ -185,7 +206,10 @@ def main():
         if len(args.args) < 2:
             print("Usage: send-to <username> <file_id>")
             sys.exit(1)
-        client.send_command(args.command, *args.args)
+        #client.send_command(args.command, *args.args)
+        recipient, file_id = args.args
+        response = client.send_command(args.command, recipient, file_id)
+        print(response)  # This will print the server's response
     else:
         print(f"Unknown command: {args.command}")
 

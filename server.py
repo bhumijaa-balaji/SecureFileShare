@@ -17,6 +17,7 @@ class Server:
         self.server_key = self.generate_key(self.server_cfg_file['server_secret'])
         self.file_db_path = self.server_cfg_file['file_db_path']
         self.users_db_path = self.server_cfg_file['users_db_path']
+        self.shared_files_db_path = self.server_cfg_file['shared_files_db_path']
         self.default_expiration = self.server_cfg_file['default_expiration']
         self.init_database()
 
@@ -39,7 +40,9 @@ class Server:
                            max_download INTEGER DEFAULT 0,
                            curr_download_cnt INTEGER,
                            file_size INTEGER,
-                           location TEXT)''')
+                           location TEXT,
+                           file_name TEXT,
+                           uploader TEXT)''')
         conn.commit()
         conn.close()
 
@@ -50,6 +53,15 @@ class Server:
                                 password TEXT)''')
         file_conn.commit()
         file_conn.close()
+
+        shared_file_conn = sqlite3.connect(self.shared_files_db_path)
+        shared_file_cursor = shared_file_conn.cursor()
+        shared_file_cursor.execute('''CREATE TABLE IF NOT EXISTS shared_files
+                                    (file_id TEXT,
+                                    receiver TEXT,
+                                    FOREIGN KEY (file_id) REFERENCES files(file_id))''')
+        shared_file_conn.commit()
+        shared_file_conn.close()
 
     def start(self):
         server_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -64,27 +76,32 @@ class Server:
 
     def perform_operations(self, conn):
         try:
-            is_authenticated = self.authenticate_user(conn)
+            is_authenticated, username = self.authenticate_user(conn)
             print(f"Authentication status: {is_authenticated}")
             if is_authenticated:
-                while True:
-                    cmd = conn.recv(1024).decode()
-                    print(f"Received command: '{cmd}'")
-                    conn.send("Command received".encode())
-                    if cmd == 'upload':
-                        self.upload_file(conn)
-                    elif cmd == 'download':
-                        self.download_file(conn)
-                    elif cmd == 'list-uploaded':
-                        self.list_uploaded(conn)
-                    elif cmd == 'list-available':
-                        self.list_available(conn)
-                    elif cmd == 'exit':
-                        print("Client requested to exit")
-                        break
-                    else:
-                        print('Invalid command')
-                        conn.send("Invalid command".encode())
+                #while True:
+                cmd = conn.recv(1024).decode()
+                print(f"Received command: '{cmd}'")
+                conn.send("Command received".encode())
+                if cmd == 'upload':
+                    self.upload_file(conn, username)
+                elif cmd.startswith('download'):
+                    cmd = cmd.split()
+                    file_id = cmd[1]
+                    self.download_file(conn,file_id)
+                elif cmd.startswith('list-uploaded'):
+                    self.list_uploaded(conn, username)
+                elif cmd.startswith('list-available'):
+                    self.list_available(conn, username)
+                elif cmd.startswith('send-to'):
+                    _, receiver, file_id = cmd.split()
+                    self.send_to(conn,username, receiver, file_id)
+                elif cmd == 'exit':
+                    print("Client requested to exit")
+                    #break
+                else:
+                    print('Invalid command')
+                    conn.send("Invalid command".encode())
         except Exception as e:
             print(f"An error occurred during operations: {e}")
         finally:
@@ -98,7 +115,7 @@ class Server:
         send_auth_response = 'Authentication successful'
         if username == 'anonymous':
             client_socket.send(send_auth_response.encode())
-            return True
+            return True, username
         file_conn = sqlite3.connect(self.users_db_path)
         file_cursor = file_conn.cursor()
         file_cursor.execute('SELECT * FROM users WHERE username = ?', (username,))
@@ -109,17 +126,17 @@ class Server:
             file_conn.commit()
             client_socket.send(send_auth_response.encode())
             file_conn.close()
-            return True
+            return True, username
         else:
             if self.verify_password(password, result[1]):
                 client_socket.send(send_auth_response.encode())
                 file_conn.close()
-                return True
+                return True, username
             else:
                 fail_response = 'Authentication unsuccessful'
                 client_socket.send(fail_response.encode())
                 file_conn.close()
-                return False
+                return False, username
 
     def hash_password(self, password):
         salt = os.urandom(16)
@@ -153,7 +170,7 @@ class Server:
             data += more
         return data
 
-    def upload_file(self, client_socket):
+    def upload_file(self, client_socket, username):
         metadata_length = int.from_bytes(self.recv_all(client_socket, 4), byteorder='big')
         metadata = json.loads(self.recv_all(client_socket, metadata_length).decode())
         file_name = metadata['file_name']
@@ -197,9 +214,9 @@ class Server:
         db_conn = sqlite3.connect(self.file_db_path)
         cursor = db_conn.cursor()
         cursor.execute('''
-            INSERT INTO files (file_id, expire_time, max_download, curr_download_cnt, file_size, location)
-            VALUES (?, ?, ?, ?, ?, ?)
-        ''', (file_identifier, time.time() + expiration_time * 60, max_download_cnt, 0, file_size, file_path))
+            INSERT INTO files (file_id, expire_time, max_download, curr_download_cnt, file_size, location, file_name, uploader)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (file_identifier, time.time() + expiration_time * 60, max_download_cnt, 0, file_size, file_path, file_name, username))
         db_conn.commit()
         db_conn.close()
         dest_path = os.path.join(file_path, file_name)
@@ -209,17 +226,94 @@ class Server:
         client_socket.send(file_identifier.encode())
         print(f"File uploaded successfully. Identifier: {file_identifier}")
 
-    def download_file(self, client_socket):
-        # Implement download logic here
-        pass
+    def download_file(self, client_socket, file_id):
+        print(f"Downloading file with ID: {file_id}")
 
-    def list_uploaded(self, client_socket):
-        # Implement list uploaded files logic here
-        pass
+        db_conn = sqlite3.connect(self.file_db_path)
+        cursor = db_conn.cursor()
+        cursor.execute("SELECT * FROM files WHERE file_id = ?", (file_id,))
+        file_info = cursor.fetchone()
+        
+        if file_info:
+            if time.time() < file_info[1] and file_info[3] < file_info[2]:
+                file_location = file_info[5]
+                file_name = file_info[6]
+                file_path = os.path.join(file_location, file_name)
+                
+                with open(file_path, 'rb') as f:
+                    encrypted_data = f.read()
+                
+                fernet = Fernet(self.server_key)
+                decrypted_data = fernet.decrypt(encrypted_data)
+                
+                # Send the decrypted data as bytes
+                client_socket.sendall(decrypted_data)
+                
+                # Update download count
+                cursor.execute("UPDATE files SET curr_download_cnt = curr_download_cnt + 1 WHERE file_id = ?", (file_id,))
+                db_conn.commit()
+            else:
+                client_socket.send(b'File expired or max downloads reached')
+                cursor.execute('DELETE FROM files WHERE file_id = ?', (file_id,))
+                db_conn.commit()
+        else:
+            client_socket.send(b"File not found")
+    
+        db_conn.close()
 
-    def list_available(self, client_socket):
-        # Implement list available files logic here
-        pass
+    def list_uploaded(self, client_socket, username):
+        db_conn = sqlite3.connect(self.file_db_path)
+        cursor = db_conn.cursor()
+        cursor.execute('''
+            SELECT file_id, file_name, expire_time, max_download, curr_download_cnt
+            FROM files WHERE uploader = ?
+        ''', (username,))
+        uploaded_files = [
+            {
+                'fid': file_info[0],
+                'filename': file_info[1],
+                'expiration': file_info[2],
+                'downloads_left': file_info[3] - file_info[4]
+            }
+            for file_info in cursor.fetchall()
+        ]
+        db_conn.close()
+        print(uploaded_files)
+        client_socket.send(json.dumps(uploaded_files).encode())
+
+    def list_available(self, client_socket, username):
+        db_conn = sqlite3.connect(self.file_db_path)
+        cursor = db_conn.cursor()
+        cursor.execute('''
+            SELECT file_id FROM files
+            WHERE uploader != ? AND expiration > ? AND current_downloads < max_downloads
+        ''', (username, time.time()))
+        available_files = [row[0] for row in cursor.fetchall()]
+        db_conn.close()
+        client_socket.send(json.dumps(available_files).encode())
+
+    def send_to(self, client_socket, sender, receiver, file_id):
+        db_conn = sqlite3.connect(self.file_db_path)
+        cursor = db_conn.cursor()
+
+        sf_db_conn = sqlite3.connect(self.shared_files_db_path)
+        sf_cursor = sf_db_conn.cursor()
+
+        cursor.execute("SELECT * FROM files WHERE file_id = ? AND uploader = ?", (file_id, sender))
+        file_info = cursor.fetchone()
+        
+        if file_info:
+            # File exists and was uploaded by the sender
+            # Add the file to the recipient's available files
+            sf_cursor.execute("INSERT INTO shared_files (file_id, receiver) VALUES (?, ?)", (file_id, receiver))
+            sf_db_conn.commit()
+            response = f"File {file_id} has been shared with {receiver}"
+        else:
+            response = f"File {file_id} not found or you don't have permission to share it"
+        
+        db_conn.close()
+        sf_db_conn.close()
+        client_socket.send(response.encode())
 
 if __name__ == '__main__':
     server = Server('server-cfg.json')
