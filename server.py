@@ -278,50 +278,55 @@ class Server:
         print(uploaded_files)
         client_socket.send(json.dumps(uploaded_files).encode())
         
-        def list_available(self, client_socket, username):
-            try:
-                db_conn = sqlite3.connect(self.file_db_path)
-                cursor = db_conn.cursor()
-                sf_db_conn = sqlite3.connect(self.shared_files_db_path)
-                sf_cursor = sf_db_conn.cursor()
+    def list_available(self, client_socket, username):
+        try:
+            db_conn = sqlite3.connect(self.file_db_path)
+            cursor = db_conn.cursor()
+            sf_db_conn = sqlite3.connect(self.shared_files_db_path)
+            sf_cursor = sf_db_conn.cursor()
+            cursor.execute('''
+                SELECT file_id, file_name, expire_time, max_download, curr_download_cnt
+                FROM files WHERE uploader = ?
+            ''', (username,))
+            uploaded_files = [
+                {
+                    'fid': file_info[0],
+                    'filename': file_info[1],
+                    'sender': 'You',
+                    'type': 'uploaded'
+                }
+                for file_info in cursor.fetchall()
+            ]
+            # Get files shared with the current user
+            sf_cursor.execute('''
+                SELECT file_id, receiver FROM shared_files
+                WHERE receiver = ?
+            ''', (username,))
+            shared_file_ids = [row[0] for row in sf_cursor.fetchall()]
 
-                # Get files uploaded by the user
-                cursor.execute('''
+            # Get details of shared files from the files database
+            shared_files = []
+            if shared_file_ids:
+                placeholders = ','.join(['?' for _ in shared_file_ids])
+                cursor.execute(f'''
                     SELECT file_id, file_name, uploader FROM files
-                    WHERE uploader = ? AND expire_time > ? AND curr_download_cnt < max_download
-                ''', (username, time.time()))
-                user_files = [{'fid': row[0], 'filename': row[1], 'sender': row[2], 'type': 'uploaded'} for row in cursor.fetchall()]
+                    WHERE file_id IN ({placeholders})
+                    AND expire_time > ? AND curr_download_cnt < max_download
+                ''', (*shared_file_ids, time.time()))
+                shared_files = [{'fid': row[0], 'filename': row[1], 'sender': row[2], 'type': 'shared'} for row in cursor.fetchall()]
 
-                # Get files shared with the current user
-                sf_cursor.execute('''
-                    SELECT file_id, receiver FROM shared_files
-                    WHERE receiver = ?
-                ''', (username,))
-                shared_file_ids = [row[0] for row in sf_cursor.fetchall()]
+            # Combine all lists
+            available_files = uploaded_files + shared_files
 
-                # Get details of shared files from the files database
-                shared_files = []
-                if shared_file_ids:
-                    placeholders = ','.join(['?' for _ in shared_file_ids])
-                    cursor.execute(f'''
-                        SELECT file_id, file_name, uploader FROM files
-                        WHERE file_id IN ({placeholders})
-                        AND expire_time > ? AND curr_download_cnt < max_download
-                    ''', (*shared_file_ids, time.time()))
-                    shared_files = [{'fid': row[0], 'filename': row[1], 'sender': row[2], 'type': 'shared'} for row in cursor.fetchall()]
-
-                # Combine all lists
-                available_files = user_files + shared_files
-
-                client_socket.send(json.dumps(available_files).encode())
-            except sqlite3.Error as e:
-                print(f"Database error: {e}")
-                client_socket.send(json.dumps({"error": "Database error occurred"}).encode())
-            finally:
-                if db_conn:
-                    db_conn.close()
-                if sf_db_conn:
-                    sf_db_conn.close()
+            client_socket.send(json.dumps(available_files).encode())
+        except sqlite3.Error as e:
+            print(f"Database error: {e}")
+            client_socket.send(json.dumps({"error": "Database error occurred"}).encode())
+        finally:
+            if db_conn:
+                db_conn.close()
+            if sf_db_conn:
+                sf_db_conn.close()
 
     def send_to(self, client_socket, sender, receiver, file_id):
         db_conn = sqlite3.connect(self.file_db_path)

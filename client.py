@@ -189,6 +189,7 @@ class SecureFileClient:
                         if encrypted_data_with_mac:
                             try:
                                 decrypted_data = self.decrypt_file(encrypted_data_with_mac)
+                                print(decrypted_data)
                                 if decrypted_data:
                                     with open(f"downloaded_{fid}", 'wb') as f:
                                         f.write(decrypted_data)
