@@ -227,38 +227,35 @@ class Server:
         print(f"File uploaded successfully. Identifier: {file_identifier}")
 
     def download_file(self, client_socket, file_id):
-        print(f"Downloading file with ID: {file_id}")
-
         db_conn = sqlite3.connect(self.file_db_path)
         cursor = db_conn.cursor()
         cursor.execute("SELECT * FROM files WHERE file_id = ?", (file_id,))
         file_info = cursor.fetchone()
-        
         if file_info:
             if time.time() < file_info[1] and file_info[3] < file_info[2]:
                 file_location = file_info[5]
                 file_name = file_info[6]
                 file_path = os.path.join(file_location, file_name)
-                
-                with open(file_path, 'rb') as f:
-                    encrypted_data = f.read()
-                
-                fernet = Fernet(self.server_key)
-                decrypted_data = fernet.decrypt(encrypted_data)
-                
-                # Send the decrypted data as bytes
-                client_socket.sendall(decrypted_data)
-                
-                # Update download count
-                cursor.execute("UPDATE files SET curr_download_cnt = curr_download_cnt + 1 WHERE file_id = ?", (file_id,))
-                db_conn.commit()
+                try:
+                    with open(file_path, 'rb') as f:
+                        encrypted_data = f.read()
+                    fernet = Fernet(self.server_key)
+                    decrypted_data = fernet.decrypt(encrypted_data)
+                    # Send the decrypted data as bytes
+                    client_socket.sendall(decrypted_data)
+                    # Update download count
+                    cursor.execute("UPDATE files SET curr_download_cnt = curr_download_cnt + 1 WHERE file_id = ?", (file_id,))
+                    db_conn.commit()
+                except Exception as e:
+                    error_message = f"Error processing file: {str(e)}"
+                    client_socket.send(error_message.encode())
+                    print(error_message)
             else:
                 client_socket.send(b'File expired or max downloads reached')
                 cursor.execute('DELETE FROM files WHERE file_id = ?', (file_id,))
                 db_conn.commit()
         else:
             client_socket.send(b"File not found")
-    
         db_conn.close()
 
     def list_uploaded(self, client_socket, username):
@@ -280,40 +277,85 @@ class Server:
         db_conn.close()
         print(uploaded_files)
         client_socket.send(json.dumps(uploaded_files).encode())
+        
+        def list_available(self, client_socket, username):
+            try:
+                db_conn = sqlite3.connect(self.file_db_path)
+                cursor = db_conn.cursor()
+                sf_db_conn = sqlite3.connect(self.shared_files_db_path)
+                sf_cursor = sf_db_conn.cursor()
 
-    def list_available(self, client_socket, username):
-        db_conn = sqlite3.connect(self.file_db_path)
-        cursor = db_conn.cursor()
-        cursor.execute('''
-            SELECT file_id FROM files
-            WHERE uploader != ? AND expiration > ? AND current_downloads < max_downloads
-        ''', (username, time.time()))
-        available_files = [row[0] for row in cursor.fetchall()]
-        db_conn.close()
-        client_socket.send(json.dumps(available_files).encode())
+                # Get files uploaded by the user
+                cursor.execute('''
+                    SELECT file_id, file_name, uploader FROM files
+                    WHERE uploader = ? AND expire_time > ? AND curr_download_cnt < max_download
+                ''', (username, time.time()))
+                user_files = [{'fid': row[0], 'filename': row[1], 'sender': row[2], 'type': 'uploaded'} for row in cursor.fetchall()]
+
+                # Get files shared with the current user
+                sf_cursor.execute('''
+                    SELECT file_id, receiver FROM shared_files
+                    WHERE receiver = ?
+                ''', (username,))
+                shared_file_ids = [row[0] for row in sf_cursor.fetchall()]
+
+                # Get details of shared files from the files database
+                shared_files = []
+                if shared_file_ids:
+                    placeholders = ','.join(['?' for _ in shared_file_ids])
+                    cursor.execute(f'''
+                        SELECT file_id, file_name, uploader FROM files
+                        WHERE file_id IN ({placeholders})
+                        AND expire_time > ? AND curr_download_cnt < max_download
+                    ''', (*shared_file_ids, time.time()))
+                    shared_files = [{'fid': row[0], 'filename': row[1], 'sender': row[2], 'type': 'shared'} for row in cursor.fetchall()]
+
+                # Combine all lists
+                available_files = user_files + shared_files
+
+                client_socket.send(json.dumps(available_files).encode())
+            except sqlite3.Error as e:
+                print(f"Database error: {e}")
+                client_socket.send(json.dumps({"error": "Database error occurred"}).encode())
+            finally:
+                if db_conn:
+                    db_conn.close()
+                if sf_db_conn:
+                    sf_db_conn.close()
 
     def send_to(self, client_socket, sender, receiver, file_id):
         db_conn = sqlite3.connect(self.file_db_path)
         cursor = db_conn.cursor()
-
         sf_db_conn = sqlite3.connect(self.shared_files_db_path)
         sf_cursor = sf_db_conn.cursor()
 
-        cursor.execute("SELECT * FROM files WHERE file_id = ? AND uploader = ?", (file_id, sender))
-        file_info = cursor.fetchone()
+        try:
+            cursor.execute("SELECT * FROM files WHERE file_id = ? AND uploader = ? AND expire_time > ? AND curr_download_cnt < max_download", 
+                        (file_id, sender, time.time()))
+            file_info = cursor.fetchone()
+            
+            if file_info:
+                # Check if the file has already been shared with the receiver
+                sf_cursor.execute("SELECT * FROM shared_files WHERE file_id = ? AND receiver = ?", (file_id, receiver))
+                if sf_cursor.fetchone():
+                    response = f"File {file_id} has already been shared with {receiver}"
+                else:
+                    # Add the file to the recipient's available files
+                    sf_db_conn.execute("BEGIN TRANSACTION")
+                    sf_cursor.execute("INSERT INTO shared_files (file_id, receiver) VALUES (?, ?)", (file_id, receiver))
+                    sf_db_conn.commit()
+                    response = f"File {file_id} has been shared with {receiver}"
+            else:
+                response = f"File {file_id} not found, expired, reached max downloads, or you don't have permission to share it"
         
-        if file_info:
-            # File exists and was uploaded by the sender
-            # Add the file to the recipient's available files
-            sf_cursor.execute("INSERT INTO shared_files (file_id, receiver) VALUES (?, ?)", (file_id, receiver))
-            sf_db_conn.commit()
-            response = f"File {file_id} has been shared with {receiver}"
-        else:
-            response = f"File {file_id} not found or you don't have permission to share it"
+        except sqlite3.Error as e:
+            sf_db_conn.rollback()
+            response = f"An error occurred while sharing the file: {str(e)}"
         
-        db_conn.close()
-        sf_db_conn.close()
-        client_socket.send(response.encode())
+        finally:
+            db_conn.close()
+            sf_db_conn.close()
+            client_socket.send(response.encode())
 
 if __name__ == '__main__':
     server = Server('server-cfg.json')
