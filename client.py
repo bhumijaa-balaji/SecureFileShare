@@ -6,10 +6,10 @@ from cryptography.fernet import Fernet
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 from cryptography.hazmat.primitives.hmac import HMAC
+from cryptography.exceptions import InvalidSignature
 import base64
 import argparse
 import getpass
-import re
 
 class SecureFileClient:
     def __init__(self, config_file, username, password):
@@ -38,13 +38,17 @@ class SecureFileClient:
         mac = HMAC(self.auth_key, hashes.SHA256())
         mac.update(encrypted_data)
         return encrypted_data + mac.finalize()
-
+    
     def decrypt_file(self, encrypted_data):
         mac = encrypted_data[-32:]
         encrypted_data = encrypted_data[:-32]
         hmac = HMAC(self.auth_key, hashes.SHA256())
         hmac.update(encrypted_data)
-        hmac.verify(mac)
+        try:
+            hmac.verify(mac)
+        except InvalidSignature:
+            print("Error: Signature verification failed. The file may have been tampered with.")
+            return None
         f = Fernet(self.encryption_key)
         return f.decrypt(encrypted_data)
 
@@ -158,16 +162,49 @@ class SecureFileClient:
     def list_available(self):
         response = self.send_command("list-available")
         if response:
-            self.available_files = json.loads(response)
-            print("Available files:")
-            for file in self.available_files:
-                print(f"FID: {file['fid']}, Filename: {file['filename']}, Sender: {file['sender']}")
+            try:
+                _, json_data = response.split('[', 1)
+                json_data = '[' + json_data
+                self.available_files = json.loads(json_data)
+                if self.available_files:
+                    print("Available Files:")
+                    for file in self.available_files:
+                        print(f"FID: {file['fid']}, Filename: {file['filename']}, Sender: {file['sender']}")
+            except json.JSONDecodeError:
+                print("No files uploaded or unable to parse the server response.")
+        else:
+            print("No response received from the server.")
 
     def download_by_fid(self, fid):
         if fid:
-            self.send_command("download", fid)
+            try:
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    s.connect(self.server_address)
+                    if not self.authenticate(s):
+                        return
+                    s.sendall(f"download {fid}".encode())
+                    response = s.recv(1024)
+                    if response == b"Command received":
+                        encrypted_data_with_mac = s.recv(4096)
+                        if encrypted_data_with_mac:
+                            try:
+                                decrypted_data = self.decrypt_file(encrypted_data_with_mac)
+                                if decrypted_data:
+                                    with open(f"downloaded_{fid}", 'wb') as f:
+                                        f.write(decrypted_data)
+                                    print(f"File saved as downloaded_{fid}")
+                                else:
+                                    print("Failed to decrypt the file")
+                            except Exception as e:
+                                print(f"Error processing file: {e}")
+                        else:
+                            print("No file data received")
+                    else:
+                        print(f"Unexpected server response: {response.decode()}")
+            except Exception as e:
+                print(f"An error occurred: {e}")
         else:
-            print(f"No file found with FID: {fid}")
+         print(f"No file found with FID: {fid}")
 
 def main():
     parser = argparse.ArgumentParser(description="Secure File Sharing Client")
