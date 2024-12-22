@@ -1,4 +1,4 @@
-# Problem Statement
+## Problem Statement
 Digital communication and data sharing are increasingly critical for organizations. Modern file-sharing systems face significant security and operational challenges and protecting sensitive information while enabling collaboration is a key requirement.
 
 ## Key Challenges
