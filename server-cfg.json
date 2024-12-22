@@ -7,5 +7,6 @@
     "file_db_path": "files.db",
     "users_db_path": "users.db",
     "default_expiration": 2,
-    "shared_files_db_path": "shared_files.db"
+    "shared_files_db_path": "shared_files.db",
+    "database_path": "data_base.db"
 }
